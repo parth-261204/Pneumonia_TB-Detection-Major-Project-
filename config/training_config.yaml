@@ -1,0 +1,35 @@
+training:
+  image_size: [224, 224]
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.0001
+  validation_split: 0.2
+  
+augmentation:
+  rotation_range: 15
+  width_shift_range: 0.1
+  height_shift_range: 0.1
+  horizontal_flip: true
+  zoom_range: 0.1
+  fill_mode: "nearest"
+
+optimizer:
+  type: "adam"
+  learning_rate: 0.0001
+  beta_1: 0.9
+  beta_2: 0.999
+
+loss:
+  type: "categorical_crossentropy"
+
+callbacks:
+  early_stopping:
+    monitor: "val_loss"
+    patience: 10
+    restore_best_weights: true
+  
+  reduce_lr:
+    monitor: "val_loss"
+    factor: 0.5
+    patience: 5
+    min_lr: 0.000001

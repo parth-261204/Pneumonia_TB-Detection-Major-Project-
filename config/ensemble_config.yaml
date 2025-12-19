@@ -1,0 +1,19 @@
+ensemble:
+  method: "weighted_average"
+  models:
+    - name: "mobilenetv3"
+      weight: 0.25
+    - name: "efficientnetb0"
+      weight: 0.30
+    - name: "densenet121"
+      weight: 0.25
+    - name: "resnet50"
+      weight: 0.20
+  
+  normalization: true
+  confidence_threshold: 0.7
+
+gradcam:
+  alpha: 0.4
+  colormap: "jet"
+  target_size: [224, 224]

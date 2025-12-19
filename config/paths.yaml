@@ -1,0 +1,27 @@
+data:
+  raw: "data/raw"
+  processed: "data/processed"
+  train: "data/processed/train"
+  val: "data/processed/val"
+  test: "data/processed/test"
+
+models:
+  mobilenetv3: "models/mobilenetv3/weights/mobilenetv3_best.h5"
+  efficientnetb0: "models/efficientnetb0/weights/efficientnetb0_best.h5"
+  densenet121: "models/densenet121/weights/densenet121_best.h5"
+  resnet50: "models/resnet50/weights/resnet50_best.h5"
+
+ensemble:
+  weights_file: "ensemble/ensemble_weights.json"
+
+reports:
+  output: "reports"
+  images: "reports/images"
+  original: "reports/images/original"
+  gradcam: "reports/images/gradcam"
+  overlays: "reports/images/overlays"
+
+classes:
+  - "Normal"
+  - "Tuberculosis"
+  - "Pneumonia"
