@@ -3,4 +3,4 @@
  * URL, for example: https://pulmoscan-api.onrender.com
  * Leave blank for the local FastAPI interface.
  */
-window.PULMOSCAN_API_URL = window.PULMOSCAN_API_URL || '';
+window.PULMOSCAN_API_URL = window.PULMOSCAN_API_URL || 'https://pulmonoscan-api.onrender.com';
