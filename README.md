@@ -123,7 +123,7 @@ The backend and frontend deploy independently:
 
 1. Push this repository to GitHub. The model weights in `models/` are required by Render and are intentionally tracked; do not upload the included project ZIP or virtual environment.
 2. In Render, create a **Blueprint** from the repository. It detects `render.yaml`; choose a unique service name and set `FRONTEND_ORIGINS` to the Vercel URL after the frontend exists.
-3. In Vercel, import the same repository, set the **Root Directory** to `majorProject` only if this project is nested in a larger repository (otherwise leave it at the repository root), and deploy. It serves `static/` as a static site using `vercel.json`.
+3. In Vercel, import the same repository and deploy with the repository root as the **Root Directory**. It serves `static/` as a static site using `vercel.json`.
 4. Edit `static/config.js` before the Vercel deployment and set the Render API URL:
 
 ```js
