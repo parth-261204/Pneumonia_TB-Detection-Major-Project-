@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PulmoScan AI — Chest X-Ray Diagnostic Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Albert+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+  <!-- ── HEADER ── -->
+  <header class="header">
+    <div class="header-brand">
+      <div class="brand-icon">
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+          <rect width="36" height="36" rx="9" fill="#1a3557"/>
+          <path d="M9 18 C9 18 11.5 11 18 11 C24.5 11 27 18 27 18 C27 18 24.5 25 18 25 C11.5 25 9 18 9 18Z" stroke="white" stroke-width="1.5" fill="none"/>
+          <circle cx="18" cy="18" r="3.5" fill="white"/>
+          <path d="M18 8.5V7M18 29V27.5M8.5 18H7M29 18H27.5" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-name">PulmoScan AI</div>
+        <div class="brand-tagline">Chest Radiograph Diagnostic Assistant</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="system-status" id="systemStatus">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Initialising…</span>
+      </div>
+      <div class="header-chips">
+        <span class="chip">Accuracy 98.67%</span>
+        <span class="chip chip-blue">AUC 0.9997</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── TWO-COLUMN BODY ── -->
+  <div class="layout">
+
+    <!-- ── LEFT COLUMN ── -->
+    <aside class="col-left">
+
+      <div class="step-label">STEP 1 &mdash; UPLOAD RADIOGRAPH</div>
+
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="fileInput" accept="image/*" hidden />
+        <div class="upload-idle" id="uploadIdle">
+          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+            <rect x="1.5" y="1.5" width="41" height="41" rx="11" stroke="#bacede" stroke-width="1.5" stroke-dasharray="5 3"/>
+            <path d="M22 29V17M22 17L16 23M22 17L28 23" stroke="#4a7ea5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M14 32h16" stroke="#bacede" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <p class="upload-title">Drop chest X-ray here</p>
+          <p class="upload-sub">or <button class="link-btn" onclick="document.getElementById('fileInput').click()">browse files</button></p>
+          <p class="upload-fmt">JPEG &middot; PNG &middot; BMP &nbsp;&bull;&nbsp; Max 20 MB</p>
+        </div>
+        <div class="upload-preview" id="uploadPreview" style="display:none">
+          <img id="previewImg" alt="X-ray preview"/>
+          <div class="preview-meta">
+            <span class="preview-filename" id="previewFilename"></span>
+            <button class="remove-btn" id="clearBtn">&#215; Remove</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="step-label" style="margin-top:20px">STEP 2 &mdash; RUN ANALYSIS</div>
+
+      <button class="analyse-btn" id="analyzeBtn" disabled>
+        <span id="btnLabel">Run Diagnostic Analysis</span>
+        <span id="btnLoading" style="display:none">
+          <svg class="spin" width="17" height="17" viewBox="0 0 17 17"><circle cx="8.5" cy="8.5" r="6.5" stroke="white" stroke-width="2" stroke-dasharray="22 14" fill="none"/></svg>
+          Analysing radiograph…
+        </span>
+      </button>
+
+      <!-- Class guide -->
+      <div class="guide-card">
+        <div class="guide-title">Diagnostic Categories</div>
+        <div class="guide-row">
+          <span class="guide-dot" style="background:#1e7e3e"></span>
+          <div>
+            <div class="guide-name">Normal</div>
+            <div class="guide-desc">No radiographic abnormality detected</div>
+          </div>
+        </div>
+        <div class="guide-row">
+          <span class="guide-dot" style="background:#b45309"></span>
+          <div>
+            <div class="guide-name">Pneumonia</div>
+            <div class="guide-desc">Consolidation pattern consistent with bacterial or viral infection</div>
+          </div>
+        </div>
+        <div class="guide-row">
+          <span class="guide-dot" style="background:#b91c1c"></span>
+          <div>
+            <div class="guide-name">Tuberculosis</div>
+            <div class="guide-desc">Apical infiltrates or cavitating lesions suggestive of TB</div>
+          </div>
+        </div>
+        <div class="guide-row">
+          <span class="guide-dot" style="background:#6d28d9"></span>
+          <div>
+            <div class="guide-name">Unknown / Unclassifiable</div>
+            <div class="guide-desc">Image does not match any trained diagnostic pattern</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Disclaimer -->
+      <div class="disclaimer">
+        <strong>⚕ Clinical Advisory</strong>
+        <p>This tool is a <em>decision support aid</em> only. All AI findings must be reviewed and confirmed by a licensed radiologist or clinician before any clinical action is taken.</p>
+      </div>
+
+      <!-- Tech accordion -->
+      <details class="tech-accordion">
+        <summary>About the AI Model</summary>
+        <div class="tech-body">
+          <p>PulmoScan AI uses a <strong>two-level stacking ensemble</strong> trained on 15,316 annotated chest radiographs:</p>
+          <div class="model-pills">
+            <span>DenseNet121</span><span>ResNet50</span><span>EfficientNetB0</span><span>MobileNetV2</span>
+          </div>
+          <p>A logistic regression meta-learner combines probability outputs from all four networks. Validated at <strong>98.67% accuracy</strong>, <strong>AUC 0.9997</strong>.</p>
+        </div>
+      </details>
+
+      {% if load_errors %}
+      <div class="warn-card">
+        <p><strong>⚠ System Warning</strong></p>
+        {% for key, msg in load_errors.items() %}
+        <p>{{ key }}: {{ msg }}</p>
+        {% endfor %}
+        <p>Ensure model files are present in the <code>models/</code> directory.</p>
+      </div>
+      {% endif %}
+
+    </aside>
+
+    <!-- ── RIGHT COLUMN: Report ── -->
+    <main class="col-right">
+
+      <!-- Idle -->
+      <div class="report-idle" id="reportIdle">
+        <div class="idle-xray">
+          <svg width="200" height="220" viewBox="0 0 200 220" fill="none">
+            <rect x="10" y="10" width="180" height="200" rx="8" fill="#f4f8fc" stroke="#d5e4f0" stroke-width="1.5"/>
+            <!-- left lung -->
+            <path d="M66 54 C56 68 50 88 50 106 C50 134 60 148 78 154 C86 157 94 158 100 158" stroke="#c2d5e8" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <!-- right lung -->
+            <path d="M134 54 C144 68 150 88 150 106 C150 134 140 148 122 154 C114 157 106 158 100 158" stroke="#c2d5e8" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <!-- spine -->
+            <line x1="100" y1="40" x2="100" y2="168" stroke="#dde8f2" stroke-width="1.5" stroke-dasharray="4 3"/>
+            <!-- ribs -->
+            <path d="M100 68 C84 70 72 77 68 87" stroke="#dde8f2" stroke-width="1" fill="none"/>
+            <path d="M100 68 C116 70 128 77 132 87" stroke="#dde8f2" stroke-width="1" fill="none"/>
+            <path d="M100 84 C82 86 69 94 65 105" stroke="#dde8f2" stroke-width="1" fill="none"/>
+            <path d="M100 84 C118 86 131 94 135 105" stroke="#dde8f2" stroke-width="1" fill="none"/>
+            <path d="M100 100 C80 102 67 111 63 123" stroke="#dde8f2" stroke-width="1" fill="none"/>
+            <path d="M100 100 C120 102 133 111 137 123" stroke="#dde8f2" stroke-width="1" fill="none"/>
+            <!-- heart -->
+            <ellipse cx="90" cy="110" rx="16" ry="22" fill="#eaf2f9" stroke="#c2d5e8" stroke-width="1"/>
+            <!-- label bar -->
+            <rect x="30" y="180" width="140" height="20" rx="5" fill="#eaf2f9"/>
+            <rect x="50" y="185" width="100" height="10" rx="3" fill="#d5e4f0"/>
+          </svg>
+        </div>
+        <h2 class="idle-heading">Awaiting Radiograph</h2>
+        <p class="idle-text">Upload a chest X-ray image and run analysis to generate a structured AI diagnostic report.</p>
+      </div>
+
+      <!-- Report -->
+      <div class="report" id="report" style="display:none">
+
+        <div class="report-topbar">
+          <div>
+            <div class="report-title">AI Diagnostic Report</div>
+            <div class="report-meta" id="reportMeta"></div>
+          </div>
+          <div class="report-badge-wrap" id="reportDevice"></div>
+        </div>
+
+        <!-- Primary finding -->
+        <div class="finding-card" id="findingCard">
+          <div class="finding-inner">
+            <div class="finding-left">
+              <div class="finding-eyebrow">PRIMARY FINDING</div>
+              <div class="finding-diagnosis" id="findingName">—</div>
+              <div class="finding-description" id="findingDesc"></div>
+            </div>
+            <div class="finding-right">
+              <div class="conf-ring-wrap">
+                <svg width="90" height="90" viewBox="0 0 90 90">
+                  <circle cx="45" cy="45" r="38" fill="none" stroke="#e4eef7" stroke-width="7"/>
+                  <circle cx="45" cy="45" r="38" fill="none" stroke-width="7"
+                    stroke-linecap="round"
+                    stroke-dasharray="238.8" stroke-dashoffset="238.8"
+                    id="confArc" transform="rotate(-90 45 45)"/>
+                </svg>
+                <div class="conf-inner">
+                  <div class="conf-pct" id="confPct">—</div>
+                  <div class="conf-word">confidence</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="severity-strip" id="severityStrip"></div>
+        </div>
+
+        <!-- Differential -->
+        <div class="report-section">
+          <div class="rsec-title">Differential Probability</div>
+          <div class="rsec-sub">Ensemble model probability across all diagnostic categories</div>
+          <div class="diff-rows" id="diffRows"></div>
+        </div>
+
+        <!-- Model consensus -->
+        <div class="report-section">
+          <div class="rsec-title">Model Consensus</div>
+          <div class="rsec-sub">Agreement across four independent convolutional neural networks</div>
+          <div class="consensus-grid" id="consensusGrid"></div>
+        </div>
+
+        <!-- Imaging evidence (XAI) -->
+        <div class="report-section" id="xaiSection" style="display:none">
+          <div class="rsec-title">
+            Imaging Evidence
+            <span class="ai-badge">AI-Generated</span>
+          </div>
+          <div class="rsec-sub">Grad-CAM highlights the radiographic regions that most influenced the AI diagnosis. <em>Warmer colours indicate higher diagnostic weight.</em></div>
+          <div class="xai-switcher">
+            <button class="xai-btn active" data-tab="gradcam">Grad-CAM Activation</button>
+            <button class="xai-btn" data-tab="saliency">Pixel Saliency</button>
+          </div>
+          <div class="xai-frame">
+            <img id="gradcamImg" class="xai-img" style="display:none" alt="Grad-CAM"/>
+            <img id="saliencyImg" class="xai-img" style="display:none" alt="Saliency"/>
+            <div class="xai-note" id="xaiNote"></div>
+          </div>
+        </div>
+
+        <!-- Report footer -->
+        <div class="report-footer">
+          This report was generated automatically by PulmoScan AI and has <strong>not</strong> been reviewed by a radiologist.
+          It must not be used as a sole basis for clinical decisions. Always seek specialist review.
+          <span id="footerModel"></span>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/config.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
