@@ -10,4 +10,4 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: FRONTEND_ORIGINS
-        sync: false
+        value: https://pneumonia-tb-detection-major-projec.vercel.app
