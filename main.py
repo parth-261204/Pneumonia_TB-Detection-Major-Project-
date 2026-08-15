@@ -205,6 +205,7 @@ models_loaded = False
 base_models   = {}
 meta_learner  = None
 load_errors   = {}
+fast_model    = None
 
 MODEL_SPECS = [
     ("densenet", build_densenet, DENSENET_PATH),
@@ -233,17 +234,18 @@ def load_model(builder_fn, path, name):
 
 @app.on_event("startup")
 async def startup_event():
-    global base_models, meta_learner, models_loaded, load_errors
+    global base_models, meta_learner, models_loaded, load_errors, fast_model
 
-    # Do not keep a PyTorch model resident here. Keeping MobileNet in memory
-    # while constructing ResNet caused Render's 512 MB free instance to restart
-    # during requests. Models are loaded one at a time in run_inference().
+    # Render Free has 512 MB RAM. To prevent OOM errors, models will be loaded 
+    # sequentially during inference rather than keeping them all in memory.
     base_models = {}
     load_errors = {}
+    models_ready = True
     for name, _, path in MODEL_SPECS:
         if not path.exists():
             load_errors[name] = f"File not found: {path}"
             print(f"  ✗ {name}: {path} not found")
+            models_ready = False
 
     if ENSEMBLE_PATH.exists():
             try:
@@ -255,74 +257,74 @@ async def startup_event():
     else:
         load_errors["ensemble"] = f"File not found: {ENSEMBLE_PATH}"
         print(f"  ✗ Ensemble: {ENSEMBLE_PATH} not found")
+        models_ready = False
 
-    models_loaded = not any(name in load_errors for name, _, _ in MODEL_SPECS)
+    models_loaded = models_ready
 
 
 # ─────────────────────────────────────────────
 #  INFERENCE CORE
 # ─────────────────────────────────────────────
 def run_inference(pil_image: Image.Image) -> dict:
-    """Memory-safe four-model ensemble plus a MobileNet Grad-CAM overlay."""
+    """Reliable ensemble screening prediction with sequential loading plus Grad-CAM evidence."""
+    if meta_learner is None:
+        raise RuntimeError("Ensemble meta-learner is not available")
 
     orig_image = pil_image.convert("RGB")
     orig_array = np.array(orig_image)
     tensor = TRANSFORM(orig_image).unsqueeze(0).to(DEVICE)
-    model_order = ["densenet", "resnet", "efficientnet", "mobilenet"]
-    model_labels = {
-        "densenet": "DenseNet121", "resnet": "ResNet50",
-        "efficientnet": "EfficientNetB0", "mobilenet": "MobileNetV2",
-    }
-    spec_by_name = {name: (builder, path) for name, builder, path in MODEL_SPECS}
-    base_predictions, prob_vectors = {}, []
-    gradcam_model = None
-
-    for name in model_order:
-        builder, path = spec_by_name[name]
-        model, error = load_model(builder, path, name)
-
-        if error or model is None:
-            load_errors[name] = error or "Unable to load model"
-            probs = np.full(NUM_CLASSES, 1 / NUM_CLASSES)
-            base_predictions[model_labels[name]] = {"class": "N/A", "confidence": 0.0, "probs": {}}
+    
+    base_predictions = {}
+    X_meta = []
+    
+    mobilenet_model = None
+    mobilenet_pred = None
+    
+    for name, builder_fn, path in MODEL_SPECS:
+        model, error = load_model(builder_fn, path, name)
+        if error:
+            raise RuntimeError(f"Failed to load {name}: {error}")
+            
+        with torch.inference_mode():
+            prob = torch.softmax(model(tensor), dim=1).cpu().numpy()[0]
+            
+        pred_idx = int(np.argmax(prob))
+        model_display_name = {
+            "densenet": "DenseNet121",
+            "resnet": "ResNet50",
+            "efficientnet": "EfficientNetB0",
+            "mobilenet": "MobileNetV2"
+        }.get(name, name)
+        
+        base_predictions[model_display_name] = {
+            "class": TARGET_CLASSES[pred_idx],
+            "confidence": float(prob[pred_idx]),
+            "probs": {TARGET_CLASSES[i]: float(prob[i]) for i in range(NUM_CLASSES)},
+        }
+        X_meta.extend(prob)
+        
+        if name == "mobilenet":
+            mobilenet_model = model
+            mobilenet_pred = pred_idx
         else:
-            with torch.inference_mode():
-                probs = torch.softmax(model(tensor), dim=1).cpu().numpy()[0]
-            predicted = int(np.argmax(probs))
-            base_predictions[model_labels[name]] = {
-                "class": TARGET_CLASSES[predicted],
-                "confidence": float(probs[predicted]),
-                "probs": {TARGET_CLASSES[i]: float(probs[i]) for i in range(NUM_CLASSES)},
-            }
-
-        prob_vectors.append(probs.tolist())
-        if name == "mobilenet" and model is not None:
-            # MobileNet is last in the order; reuse this instance immediately
-            # for Grad-CAM instead of deserialising it a second time.
-            gradcam_model = model
-        elif model is not None:
             del model
-            gc.collect()
-
-    meta_input = np.array(prob_vectors).flatten().reshape(1, -1)
-    if meta_learner is not None:
-        ensemble_probs = meta_learner.predict_proba(meta_input)[0]
-    else:
-        ensemble_probs = np.mean(prob_vectors, axis=0)
-
-    ensemble_pred = int(np.argmax(ensemble_probs))
+            
+        gc.collect()
+        
+    X_meta_arr = np.array(X_meta).reshape(1, -1)
+    ensemble_pred = int(meta_learner.predict(X_meta_arr)[0])
+    ensemble_probs = meta_learner.predict_proba(X_meta_arr)[0]
     predicted_class = TARGET_CLASSES[ensemble_pred]
+
     gradcam_b64 = None
     try:
-        if gradcam_model is not None:
-            gradcam_b64 = generate_gradcam_image(gradcam_model, "mobilenet", tensor, ensemble_pred, orig_array)
+        gradcam_b64 = generate_gradcam_image(mobilenet_model, "mobilenet", tensor, mobilenet_pred, orig_array)
     except Exception as error:
         print(f"Grad-CAM generation error: {error}")
         traceback.print_exc()
-    finally:
-        if gradcam_model is not None:
-            del gradcam_model
-        gc.collect()
+        
+    del mobilenet_model
+    gc.collect()
 
     return {
         "predicted_class":  predicted_class,
@@ -332,7 +334,7 @@ def run_inference(pil_image: Image.Image) -> dict:
         "gradcam_image":    gradcam_b64,
         "saliency_image":   None,
         "gradcam_model":    "MobileNetV2",
-        "inference_mode":   "ensemble_with_gradcam",
+        "inference_mode":   "full_ensemble_sequential",
         "device":           str(DEVICE),
         "load_errors":      load_errors,
     }
@@ -354,8 +356,8 @@ async def index(request: Request):
 async def status():
     return {
         "models_loaded":   models_loaded,
-        "base_models":     [name for name, _, path in MODEL_SPECS if path.exists()],
-        "inference_mode":  "ensemble_with_gradcam",
+        "base_models":     list(base_models.keys()),
+        "inference_mode":  "full_ensemble_sequential",
         "ensemble_ready":  meta_learner is not None,
         "device":          str(DEVICE),
         "load_errors":     load_errors,
