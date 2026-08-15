@@ -194,17 +194,11 @@ def generate_gradcam_image(model, model_name: str, input_tensor, class_idx: int,
 # ─────────────────────────────────────────────
 app = FastAPI(title="TB & Pneumonia Detection System")
 
-# Set FRONTEND_ORIGINS on Render to your Vercel URL, for example:
-# https://your-project.vercel.app.  Comma-separated values are supported.
-frontend_origins = [
-    origin.strip() for origin in os.environ.get("FRONTEND_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",")
-    if origin.strip()
-]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=frontend_origins,
+    allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
