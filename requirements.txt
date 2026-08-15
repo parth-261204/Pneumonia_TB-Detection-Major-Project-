@@ -2,8 +2,11 @@ fastapi==0.111.0
 uvicorn[standard]==0.29.0
 python-multipart==0.0.9
 jinja2==3.1.4
-torch>=2.0.0
-torchvision>=0.15.0
+# Render has CPU-only instances. The CPU wheels avoid installing CUDA runtimes,
+# which exceed the memory budget of a free web service.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1+cpu
+torchvision==0.18.1+cpu
 pillow>=10.0.0
 numpy>=1.24.0
 opencv-python-headless>=4.8.0
