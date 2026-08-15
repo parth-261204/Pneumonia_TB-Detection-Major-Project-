@@ -205,7 +205,6 @@ models_loaded = False
 base_models   = {}
 meta_learner  = None
 load_errors   = {}
-fast_model    = None
 
 MODEL_SPECS = [
     ("densenet", build_densenet, DENSENET_PATH),
@@ -234,14 +233,13 @@ def load_model(builder_fn, path, name):
 
 @app.on_event("startup")
 async def startup_event():
-    global base_models, meta_learner, models_loaded, load_errors, fast_model
+    global base_models, meta_learner, models_loaded, load_errors
 
-    # Keep the lightweight MobileNet in memory.  The previous implementation
-    # constructed and deserialized four networks *for every upload*, then did
-    # two backward passes for visualisations.  That is impractical on Render's
-    # free CPU instances.  MobileNet provides a responsive screening result
-    # while remaining comfortably inside the instance memory budget.
+    # Do not keep a PyTorch model resident here. Keeping MobileNet in memory
+    # while constructing ResNet caused Render's 512 MB free instance to restart
+    # during requests. Models are loaded one at a time in run_inference().
     base_models = {}
+    load_errors = {}
     for name, _, path in MODEL_SPECS:
         if not path.exists():
             load_errors[name] = f"File not found: {path}"
@@ -258,25 +256,14 @@ async def startup_event():
         load_errors["ensemble"] = f"File not found: {ENSEMBLE_PATH}"
         print(f"  ✗ Ensemble: {ENSEMBLE_PATH} not found")
 
-    fast_spec = next(spec for spec in MODEL_SPECS if spec[0] == "mobilenet")
-    fast_model, error = load_model(fast_spec[1], fast_spec[2], fast_spec[0])
-    if error:
-        load_errors["mobilenet"] = error
-        print(f"  ✗ MobileNet: {error}")
-    else:
-        base_models["mobilenet"] = fast_model
-        print("  ✓ MobileNetV2 fast screening model loaded")
-
-    models_loaded = fast_model is not None
+    models_loaded = not any(name in load_errors for name, _, _ in MODEL_SPECS)
 
 
 # ─────────────────────────────────────────────
 #  INFERENCE CORE
 # ─────────────────────────────────────────────
 def run_inference(pil_image: Image.Image) -> dict:
-    """Four-model ensemble plus a Grad-CAM overlay from the resident model."""
-    if fast_model is None:
-        raise RuntimeError("Fast screening model is not available")
+    """Memory-safe four-model ensemble plus a MobileNet Grad-CAM overlay."""
 
     orig_image = pil_image.convert("RGB")
     orig_array = np.array(orig_image)
@@ -288,14 +275,11 @@ def run_inference(pil_image: Image.Image) -> dict:
     }
     spec_by_name = {name: (builder, path) for name, builder, path in MODEL_SPECS}
     base_predictions, prob_vectors = {}, []
+    gradcam_model = None
 
     for name in model_order:
-        model = fast_model if name == "mobilenet" else None
-        if model is None:
-            builder, path = spec_by_name[name]
-            model, error = load_model(builder, path, name)
-        else:
-            error = None
+        builder, path = spec_by_name[name]
+        model, error = load_model(builder, path, name)
 
         if error or model is None:
             load_errors[name] = error or "Unable to load model"
@@ -312,7 +296,11 @@ def run_inference(pil_image: Image.Image) -> dict:
             }
 
         prob_vectors.append(probs.tolist())
-        if name != "mobilenet" and model is not None:
+        if name == "mobilenet" and model is not None:
+            # MobileNet is last in the order; reuse this instance immediately
+            # for Grad-CAM instead of deserialising it a second time.
+            gradcam_model = model
+        elif model is not None:
             del model
             gc.collect()
 
@@ -326,10 +314,15 @@ def run_inference(pil_image: Image.Image) -> dict:
     predicted_class = TARGET_CLASSES[ensemble_pred]
     gradcam_b64 = None
     try:
-        gradcam_b64 = generate_gradcam_image(fast_model, "mobilenet", tensor, ensemble_pred, orig_array)
+        if gradcam_model is not None:
+            gradcam_b64 = generate_gradcam_image(gradcam_model, "mobilenet", tensor, ensemble_pred, orig_array)
     except Exception as error:
         print(f"Grad-CAM generation error: {error}")
         traceback.print_exc()
+    finally:
+        if gradcam_model is not None:
+            del gradcam_model
+        gc.collect()
 
     return {
         "predicted_class":  predicted_class,
