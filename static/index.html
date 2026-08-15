@@ -32,8 +32,8 @@
         <span id="statusText">Initialising…</span>
       </div>
       <div class="header-chips">
-        <span class="chip">Accuracy 98.67%</span>
-        <span class="chip chip-blue">AUC 0.9997</span>
+        <span class="chip">Fast screening</span>
+        <span class="chip chip-blue">MobileNetV2</span>
       </div>
     </div>
   </header>
@@ -122,9 +122,9 @@
         <div class="tech-body">
           <p>PulmoScan AI uses a <strong>two-level stacking ensemble</strong> trained on 15,316 annotated chest radiographs:</p>
           <div class="model-pills">
-            <span>DenseNet121</span><span>ResNet50</span><span>EfficientNetB0</span><span>MobileNetV2</span>
+            <span>MobileNetV2</span>
           </div>
-          <p>A logistic regression meta-learner combines probability outputs from all four networks. Validated at <strong>98.67% accuracy</strong>, <strong>AUC 0.9997</strong>.</p>
+          <p>The hosted version keeps a lightweight MobileNetV2 model in memory for responsive preliminary screening. It is a decision-support aid and must be reviewed by a qualified clinician.</p>
         </div>
       </details>
 
