@@ -265,10 +265,8 @@ function renderReport(data) {
     $('xaiSection').style.display = 'none';
   }
 
-  const isFastScreening = data.inference_mode === 'fast_screening';
-  $('footerModel').textContent = isFastScreening
-    ? ' Fast screening: cached MobileNetV2 model. For decision support only; clinician review is required.'
-    : ` Ensemble: ${MODEL_LABELS.join(', ')} → Logistic Regression meta-learner.`;
+  $('footerModel').textContent = ` Ensemble: ${MODEL_LABELS.join(', ')} → Logistic Regression meta-learner. ` +
+    `The Grad-CAM visualisation is generated from MobileNetV2; red/yellow areas are regions that influenced its prediction.`;
 
   // Show report
   reportIdle.style.display = 'none';

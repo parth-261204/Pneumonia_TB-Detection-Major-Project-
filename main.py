@@ -21,10 +21,6 @@ import torchvision.transforms as transforms
 from PIL import Image
 
 import cv2
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -110,8 +106,12 @@ class GradCAM:
         def backward_hook(module, grad_input, grad_output):
             self.gradients = grad_output[0].detach()
 
-        self.target_layer.register_forward_hook(forward_hook)
-        self.target_layer.register_full_backward_hook(backward_hook)
+        self.forward_handle = self.target_layer.register_forward_hook(forward_hook)
+        self.backward_handle = self.target_layer.register_full_backward_hook(backward_hook)
+
+    def close(self):
+        self.forward_handle.remove()
+        self.backward_handle.remove()
 
     def generate(self, input_tensor, class_idx):
         self.model.zero_grad()
@@ -154,8 +154,13 @@ def generate_gradcam_image(model, model_name: str, input_tensor, class_idx: int,
     layer = get_target_layer(model_name, model)
     gcam  = GradCAM(model, layer)
 
-    t = input_tensor.clone().requires_grad_(True)
-    cam = gcam.generate(t, class_idx)
+    try:
+        t = input_tensor.clone().requires_grad_(True)
+        cam = gcam.generate(t, class_idx)
+    finally:
+        # The MobileNet model is kept resident, so hooks must not accumulate
+        # between requests.
+        gcam.close()
 
     heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
     heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
@@ -166,57 +171,13 @@ def generate_gradcam_image(model, model_name: str, input_tensor, class_idx: int,
 
     overlay = (0.5 * orig_resized.astype(np.float32) + 0.5 * heatmap.astype(np.float32)).astype(np.uint8)
 
-    fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
-    fig.patch.set_facecolor("#0f1117")
-    titles = ["Original X-Ray", "Grad-CAM Heatmap", "Overlay"]
-    imgs   = [orig_resized, heatmap, overlay]
-    for ax, title, img in zip(axes, titles, imgs):
-        ax.imshow(img)
-        ax.set_title(title, color="white", fontsize=9, fontweight="bold", pad=6)
-        ax.axis("off")
-    plt.tight_layout(pad=0.5)
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#0f1117")
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
-
-
-def generate_saliency_image(model, input_tensor, class_idx: int, orig_img_array: np.ndarray) -> str:
-    """Pixel saliency via input-gradient magnitude."""
-    model.eval()
-    t = input_tensor.clone().requires_grad_(True)
-    output = model(t)
-    model.zero_grad()
-    output[0, class_idx].backward()
-
-    saliency = t.grad.data.abs().squeeze()           # [3, 224, 224]
-    saliency, _ = torch.max(saliency, dim=0)         # [224, 224]
-    saliency = saliency.numpy()
-    if saliency.max() > 0:
-        saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min())
-
-    orig_resized = cv2.resize(orig_img_array, (224, 224))
-    if orig_resized.ndim == 2:
-        orig_resized = np.stack([orig_resized] * 3, axis=-1)
-
-    fig, axes = plt.subplots(1, 2, figsize=(7, 3.5))
-    fig.patch.set_facecolor("#0f1117")
-    axes[0].imshow(orig_resized)
-    axes[0].set_title("Original X-Ray", color="white", fontsize=9, fontweight="bold", pad=6)
-    axes[0].axis("off")
-    axes[1].imshow(orig_resized)
-    axes[1].imshow(saliency, cmap="hot", alpha=0.55)
-    axes[1].set_title("Pixel Saliency", color="white", fontsize=9, fontweight="bold", pad=6)
-    axes[1].axis("off")
-    plt.tight_layout(pad=0.5)
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#0f1117")
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
+    # Encode the side-by-side original, heatmap and overlay directly. This is
+    # dramatically faster than starting Matplotlib for every uploaded X-ray.
+    panel = np.hstack([orig_resized, heatmap, overlay])
+    ok, png = cv2.imencode(".png", cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
+    if not ok:
+        raise RuntimeError("Could not encode Grad-CAM image")
+    return base64.b64encode(png.tobytes()).decode("utf-8")
 
 
 # ─────────────────────────────────────────────
@@ -313,32 +274,72 @@ async def startup_event():
 #  INFERENCE CORE
 # ─────────────────────────────────────────────
 def run_inference(pil_image: Image.Image) -> dict:
-    """Fast screening pipeline using the resident MobileNetV2 model."""
+    """Four-model ensemble plus a Grad-CAM overlay from the resident model."""
     if fast_model is None:
         raise RuntimeError("Fast screening model is not available")
 
-    tensor     = TRANSFORM(pil_image.convert("RGB")).unsqueeze(0).to(DEVICE)
-    with torch.inference_mode():
-        out = fast_model(tensor)
-        ensemble_probs = torch.softmax(out, dim=1).cpu().numpy()[0]
+    orig_image = pil_image.convert("RGB")
+    orig_array = np.array(orig_image)
+    tensor = TRANSFORM(orig_image).unsqueeze(0).to(DEVICE)
+    model_order = ["densenet", "resnet", "efficientnet", "mobilenet"]
+    model_labels = {
+        "densenet": "DenseNet121", "resnet": "ResNet50",
+        "efficientnet": "EfficientNetB0", "mobilenet": "MobileNetV2",
+    }
+    spec_by_name = {name: (builder, path) for name, builder, path in MODEL_SPECS}
+    base_predictions, prob_vectors = {}, []
+
+    for name in model_order:
+        model = fast_model if name == "mobilenet" else None
+        if model is None:
+            builder, path = spec_by_name[name]
+            model, error = load_model(builder, path, name)
+        else:
+            error = None
+
+        if error or model is None:
+            load_errors[name] = error or "Unable to load model"
+            probs = np.full(NUM_CLASSES, 1 / NUM_CLASSES)
+            base_predictions[model_labels[name]] = {"class": "N/A", "confidence": 0.0, "probs": {}}
+        else:
+            with torch.inference_mode():
+                probs = torch.softmax(model(tensor), dim=1).cpu().numpy()[0]
+            predicted = int(np.argmax(probs))
+            base_predictions[model_labels[name]] = {
+                "class": TARGET_CLASSES[predicted],
+                "confidence": float(probs[predicted]),
+                "probs": {TARGET_CLASSES[i]: float(probs[i]) for i in range(NUM_CLASSES)},
+            }
+
+        prob_vectors.append(probs.tolist())
+        if name != "mobilenet" and model is not None:
+            del model
+            gc.collect()
+
+    meta_input = np.array(prob_vectors).flatten().reshape(1, -1)
+    if meta_learner is not None:
+        ensemble_probs = meta_learner.predict_proba(meta_input)[0]
+    else:
+        ensemble_probs = np.mean(prob_vectors, axis=0)
 
     ensemble_pred = int(np.argmax(ensemble_probs))
     predicted_class = TARGET_CLASSES[ensemble_pred]
-    fast_prediction = {
-        "class": predicted_class,
-        "confidence": float(ensemble_probs[ensemble_pred]),
-        "probs": {TARGET_CLASSES[i]: float(ensemble_probs[i]) for i in range(NUM_CLASSES)},
-    }
+    gradcam_b64 = None
+    try:
+        gradcam_b64 = generate_gradcam_image(fast_model, "mobilenet", tensor, ensemble_pred, orig_array)
+    except Exception as error:
+        print(f"Grad-CAM generation error: {error}")
+        traceback.print_exc()
 
     return {
         "predicted_class":  predicted_class,
         "ensemble_probs":   {TARGET_CLASSES[i]: float(ensemble_probs[i]) for i in range(NUM_CLASSES)},
         "ensemble_conf":    float(ensemble_probs[ensemble_pred]),
-        "base_predictions": {"MobileNetV2": fast_prediction},
-        "gradcam_image":    None,
+        "base_predictions": base_predictions,
+        "gradcam_image":    gradcam_b64,
         "saliency_image":   None,
-        "gradcam_model":    "",
-        "inference_mode":   "fast_screening",
+        "gradcam_model":    "MobileNetV2",
+        "inference_mode":   "ensemble_with_gradcam",
         "device":           str(DEVICE),
         "load_errors":      load_errors,
     }
@@ -360,8 +361,8 @@ async def index(request: Request):
 async def status():
     return {
         "models_loaded":   models_loaded,
-        "base_models":     list(base_models.keys()),
-        "inference_mode":  "fast_screening",
+        "base_models":     [name for name, _, path in MODEL_SPECS if path.exists()],
+        "inference_mode":  "ensemble_with_gradcam",
         "ensemble_ready":  meta_learner is not None,
         "device":          str(DEVICE),
         "load_errors":     load_errors,

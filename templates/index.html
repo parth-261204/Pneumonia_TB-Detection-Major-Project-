@@ -32,8 +32,8 @@
         <span id="statusText">Initialising…</span>
       </div>
       <div class="header-chips">
-        <span class="chip">Fast screening</span>
-        <span class="chip chip-blue">MobileNetV2</span>
+        <span class="chip">4-model ensemble</span>
+        <span class="chip chip-blue">Grad-CAM</span>
       </div>
     </div>
   </header>
@@ -122,9 +122,9 @@
         <div class="tech-body">
           <p>PulmoScan AI uses a <strong>two-level stacking ensemble</strong> trained on 15,316 annotated chest radiographs:</p>
           <div class="model-pills">
-            <span>MobileNetV2</span>
+            <span>DenseNet121</span><span>ResNet50</span><span>EfficientNetB0</span><span>MobileNetV2</span>
           </div>
-          <p>The hosted version keeps a lightweight MobileNetV2 model in memory for responsive preliminary screening. It is a decision-support aid and must be reviewed by a qualified clinician.</p>
+          <p>The diagnostic result combines four model probability outputs through a logistic-regression meta-learner. Its coloured Grad-CAM evidence panel is generated from MobileNetV2. It is a decision-support aid and must be reviewed by a qualified clinician.</p>
         </div>
       </details>
 
@@ -219,8 +219,8 @@
 
         <!-- Model consensus -->
         <div class="report-section">
-          <div class="rsec-title">Screening Model</div>
-          <div class="rsec-sub">Cached MobileNetV2 inference for a responsive preliminary screening result</div>
+          <div class="rsec-title">Model Consensus</div>
+          <div class="rsec-sub">Agreement across four independent convolutional neural networks</div>
           <div class="consensus-grid" id="consensusGrid"></div>
         </div>
 
@@ -232,8 +232,6 @@
           </div>
           <div class="rsec-sub">Grad-CAM highlights the radiographic regions that most influenced the AI diagnosis. <em>Warmer colours indicate higher diagnostic weight.</em></div>
           <div class="xai-switcher">
-            <button class="xai-btn active" data-tab="gradcam">Grad-CAM Activation</button>
-            <button class="xai-btn" data-tab="saliency">Pixel Saliency</button>
           </div>
           <div class="xai-frame">
             <img id="gradcamImg" class="xai-img" style="display:none" alt="Grad-CAM"/>
