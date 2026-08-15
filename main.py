@@ -237,18 +237,29 @@ def load_model(builder_fn, path, name):
 
 @app.on_event("startup")
 async def startup_event():
-    global base_models, meta_learner, models_loaded, load_errors, fast_model
+    global base_models, meta_learner, models_loaded, load_errors
 
-    # Render Free has 512 MB RAM. To prevent OOM errors, models will be loaded 
-    # sequentially during inference rather than keeping them all in memory.
+    # Preload models into memory. With mmap=True, we avoid memory spikes and 
+    # easily fit all 4 models (155MB total) in Render's 512MB RAM limit.
     base_models = {}
     load_errors = {}
     models_ready = True
-    for name, _, path in MODEL_SPECS:
+    
+    print("Preloading models into memory for fast inference...")
+    for name, builder_fn, path in MODEL_SPECS:
         if not path.exists():
             load_errors[name] = f"File not found: {path}"
             print(f"  ✗ {name}: {path} not found")
             models_ready = False
+        else:
+            model, error = load_model(builder_fn, path, name)
+            if error:
+                load_errors[name] = error
+                print(f"  ✗ {name} failed to load: {error}")
+                models_ready = False
+            else:
+                base_models[name] = model
+                print(f"  ✓ {name} loaded successfully.")
 
     if ENSEMBLE_PATH.exists():
             try:
@@ -257,21 +268,24 @@ async def startup_event():
             except Exception:
                 import joblib
                 meta_learner = joblib.load(ENSEMBLE_PATH)
+            print("  ✓ Ensemble meta-learner loaded.")
     else:
         load_errors["ensemble"] = f"File not found: {ENSEMBLE_PATH}"
         print(f"  ✗ Ensemble: {ENSEMBLE_PATH} not found")
         models_ready = False
 
     models_loaded = models_ready
+    if models_loaded:
+        print("All models successfully preloaded! Inference will be instant.")
 
 
 # ─────────────────────────────────────────────
 #  INFERENCE CORE
 # ─────────────────────────────────────────────
 def run_inference(pil_image: Image.Image) -> dict:
-    """Reliable ensemble screening prediction with sequential loading plus Grad-CAM evidence."""
-    if meta_learner is None:
-        raise RuntimeError("Ensemble meta-learner is not available")
+    """Blistering fast ensemble screening prediction from memory plus Grad-CAM evidence."""
+    if not models_loaded or meta_learner is None:
+        raise RuntimeError("Models are not loaded or missing. Check startup logs.")
 
     orig_image = pil_image.convert("RGB")
     orig_array = np.array(orig_image)
@@ -280,13 +294,9 @@ def run_inference(pil_image: Image.Image) -> dict:
     base_predictions = {}
     X_meta = []
     
-    mobilenet_model = None
-    mobilenet_pred = None
-    
-    for name, builder_fn, path in MODEL_SPECS:
-        model, error = load_model(builder_fn, path, name)
-        if error:
-            raise RuntimeError(f"Failed to load {name}: {error}")
+    # Run all 4 base models instantly from RAM
+    for name, _, _ in MODEL_SPECS:
+        model = base_models[name]
             
         with torch.inference_mode():
             prob = torch.softmax(model(tensor), dim=1).cpu().numpy()[0]
@@ -306,14 +316,6 @@ def run_inference(pil_image: Image.Image) -> dict:
         }
         X_meta.extend(prob)
         
-        if name == "mobilenet":
-            mobilenet_model = model
-            mobilenet_pred = pred_idx
-        else:
-            del model
-            
-        gc.collect()
-        
     X_meta_arr = np.array(X_meta).reshape(1, -1)
     ensemble_pred = int(meta_learner.predict(X_meta_arr)[0])
     ensemble_probs = meta_learner.predict_proba(X_meta_arr)[0]
@@ -321,7 +323,8 @@ def run_inference(pil_image: Image.Image) -> dict:
 
     gradcam_b64 = None
     try:
-        gradcam_b64 = generate_gradcam_image(mobilenet_model, "mobilenet", tensor, mobilenet_pred, orig_array)
+        mobilenet_model = base_models["mobilenet"]
+        gradcam_b64 = generate_gradcam_image(mobilenet_model, "mobilenet", tensor, int(np.argmax(X_meta[-4:])), orig_array)
     except Exception as error:
         print(f"Grad-CAM generation error: {error}")
         traceback.print_exc()
