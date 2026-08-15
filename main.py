@@ -9,6 +9,7 @@ import uuid
 import pickle
 import base64
 import traceback
+import gc
 import numpy as np
 from pathlib import Path
 from typing import Optional
@@ -244,6 +245,13 @@ base_models   = {}
 meta_learner  = None
 load_errors   = {}
 
+MODEL_SPECS = [
+    ("densenet", build_densenet, DENSENET_PATH),
+    ("resnet", build_resnet, RESNET_PATH),
+    ("efficientnet", build_efficientnet, EFFICIENTNET_PATH),
+    ("mobilenet", build_mobilenet, MOBILENET_PATH),
+]
+
 
 def load_model(builder_fn, path, name):
     try:
@@ -266,23 +274,12 @@ def load_model(builder_fn, path, name):
 async def startup_event():
     global base_models, meta_learner, models_loaded, load_errors
 
-    specs = [
-        ("densenet",    build_densenet,    DENSENET_PATH),
-        ("resnet",      build_resnet,      RESNET_PATH),
-        ("efficientnet",build_efficientnet,EFFICIENTNET_PATH),
-        ("mobilenet",   build_mobilenet,   MOBILENET_PATH),
-    ]
-
-    for name, builder, path in specs:
-        if path.exists():
-            m, err = load_model(builder, path, name)
-            if m:
-                base_models[name] = m
-                print(f"  ✓ {name} loaded from {path}")
-            else:
-                load_errors[name] = err
-                print(f"  ✗ {name} failed: {err}")
-        else:
+    # Model weights are intentionally loaded per request rather than at startup.
+    # This keeps the four-model ensemble within Render's 512 MB free-instance
+    # memory limit while preserving identical inference behaviour.
+    base_models = {}
+    for name, _, path in MODEL_SPECS:
+        if not path.exists():
             load_errors[name] = f"File not found: {path}"
             print(f"  ✗ {name}: {path} not found")
 
@@ -297,7 +294,7 @@ async def startup_event():
         load_errors["ensemble"] = f"File not found: {ENSEMBLE_PATH}"
         print(f"  ✗ Ensemble: {ENSEMBLE_PATH} not found")
 
-    models_loaded = len(base_models) > 0
+    models_loaded = not any(name in load_errors for name, _, _ in MODEL_SPECS)
 
 
 # ─────────────────────────────────────────────
@@ -321,16 +318,24 @@ def run_inference(pil_image: Image.Image) -> dict:
     base_preds  = {}
     prob_vectors = []
 
+    spec_by_name = {name: (builder, path) for name, builder, path in MODEL_SPECS}
+
     for name in model_order:
-        if name not in base_models:
+        builder, path = spec_by_name[name]
+        model, err = load_model(builder, path, name)
+        if model is None:
+            load_errors[name] = err or "Unable to load model"
             prob_vectors.append([0.25, 0.25, 0.25, 0.25])   # fallback uniform
             base_probs[name] = [0.25] * 4
             base_preds[name] = {"class": "N/A", "confidence": 0.0}
             continue
 
         with torch.no_grad():
-            out   = base_models[name](tensor)
+            out   = model(tensor)
             probs = torch.softmax(out, dim=1).cpu().numpy()[0]
+
+        del model
+        gc.collect()
 
         prob_vectors.append(probs.tolist())
         base_probs[name] = probs.tolist()
@@ -363,15 +368,18 @@ def run_inference(pil_image: Image.Image) -> dict:
     # Pick whichever base model agrees with ensemble (highest conf for predicted class)
     best_score = -1
     for name in model_order:
-        if name in base_models:
+        if name in base_probs:
             score = base_probs[name][ensemble_pred]
             if score > best_score:
                 best_score    = score
-                gradcam_model = base_models[name]
                 gradcam_name  = name
 
-    if gradcam_model is not None:
+    if gradcam_name is not None:
         try:
+            builder, path = spec_by_name[gradcam_name]
+            gradcam_model, err = load_model(builder, path, gradcam_name)
+            if gradcam_model is None:
+                raise RuntimeError(err or "Unable to load model for explainability")
             t_grad = TRANSFORM(pil_image.convert("RGB")).unsqueeze(0).to(DEVICE)
             gradcam_b64  = generate_gradcam_image(gradcam_model, gradcam_name, t_grad, ensemble_pred, orig_array)
             t_grad2 = TRANSFORM(pil_image.convert("RGB")).unsqueeze(0).to(DEVICE)
@@ -379,6 +387,10 @@ def run_inference(pil_image: Image.Image) -> dict:
         except Exception as e:
             print(f"XAI generation error: {e}")
             traceback.print_exc()
+        finally:
+            if gradcam_model is not None:
+                del gradcam_model
+            gc.collect()
 
     return {
         "predicted_class":  predicted_class,
@@ -409,7 +421,7 @@ async def index(request: Request):
 async def status():
     return {
         "models_loaded":   models_loaded,
-        "base_models":     list(base_models.keys()),
+        "base_models":     [name for name, _, _ in MODEL_SPECS if name not in load_errors],
         "ensemble_ready":  meta_learner is not None,
         "device":          str(DEVICE),
         "load_errors":     load_errors,
