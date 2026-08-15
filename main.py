@@ -244,6 +244,7 @@ models_loaded = False
 base_models   = {}
 meta_learner  = None
 load_errors   = {}
+fast_model    = None
 
 MODEL_SPECS = [
     ("densenet", build_densenet, DENSENET_PATH),
@@ -272,11 +273,13 @@ def load_model(builder_fn, path, name):
 
 @app.on_event("startup")
 async def startup_event():
-    global base_models, meta_learner, models_loaded, load_errors
+    global base_models, meta_learner, models_loaded, load_errors, fast_model
 
-    # Model weights are intentionally loaded per request rather than at startup.
-    # This keeps the four-model ensemble within Render's 512 MB free-instance
-    # memory limit while preserving identical inference behaviour.
+    # Keep the lightweight MobileNet in memory.  The previous implementation
+    # constructed and deserialized four networks *for every upload*, then did
+    # two backward passes for visualisations.  That is impractical on Render's
+    # free CPU instances.  MobileNet provides a responsive screening result
+    # while remaining comfortably inside the instance memory budget.
     base_models = {}
     for name, _, path in MODEL_SPECS:
         if not path.exists():
@@ -294,112 +297,48 @@ async def startup_event():
         load_errors["ensemble"] = f"File not found: {ENSEMBLE_PATH}"
         print(f"  ✗ Ensemble: {ENSEMBLE_PATH} not found")
 
-    models_loaded = not any(name in load_errors for name, _, _ in MODEL_SPECS)
+    fast_spec = next(spec for spec in MODEL_SPECS if spec[0] == "mobilenet")
+    fast_model, error = load_model(fast_spec[1], fast_spec[2], fast_spec[0])
+    if error:
+        load_errors["mobilenet"] = error
+        print(f"  ✗ MobileNet: {error}")
+    else:
+        base_models["mobilenet"] = fast_model
+        print("  ✓ MobileNetV2 fast screening model loaded")
+
+    models_loaded = fast_model is not None
 
 
 # ─────────────────────────────────────────────
 #  INFERENCE CORE
 # ─────────────────────────────────────────────
 def run_inference(pil_image: Image.Image) -> dict:
-    """Full pipeline: image → base learner probs → meta-learner → result."""
-    orig_array = np.array(pil_image.convert("RGB"))
+    """Fast screening pipeline using the resident MobileNetV2 model."""
+    if fast_model is None:
+        raise RuntimeError("Fast screening model is not available")
+
     tensor     = TRANSFORM(pil_image.convert("RGB")).unsqueeze(0).to(DEVICE)
+    with torch.inference_mode():
+        out = fast_model(tensor)
+        ensemble_probs = torch.softmax(out, dim=1).cpu().numpy()[0]
 
-    model_order = ["densenet", "resnet", "efficientnet", "mobilenet"]
-    model_labels = {
-        "densenet":     "DenseNet121",
-        "resnet":       "ResNet50",
-        "efficientnet": "EfficientNetB0",
-        "mobilenet":    "MobileNetV2",
-    }
-
-    # --- Base learner inference ---
-    base_probs  = {}
-    base_preds  = {}
-    prob_vectors = []
-
-    spec_by_name = {name: (builder, path) for name, builder, path in MODEL_SPECS}
-
-    for name in model_order:
-        builder, path = spec_by_name[name]
-        model, err = load_model(builder, path, name)
-        if model is None:
-            load_errors[name] = err or "Unable to load model"
-            prob_vectors.append([0.25, 0.25, 0.25, 0.25])   # fallback uniform
-            base_probs[name] = [0.25] * 4
-            base_preds[name] = {"class": "N/A", "confidence": 0.0}
-            continue
-
-        with torch.no_grad():
-            out   = model(tensor)
-            probs = torch.softmax(out, dim=1).cpu().numpy()[0]
-
-        del model
-        gc.collect()
-
-        prob_vectors.append(probs.tolist())
-        base_probs[name] = probs.tolist()
-        pred_idx = int(np.argmax(probs))
-        base_preds[name] = {
-            "class":      TARGET_CLASSES[pred_idx],
-            "confidence": float(probs[pred_idx]),
-            "probs":      {TARGET_CLASSES[i]: float(probs[i]) for i in range(NUM_CLASSES)},
-        }
-
-    # --- Ensemble meta-learner ---
-    meta_input = np.array(prob_vectors).flatten().reshape(1, -1)  # [1, 16]
-
-    if meta_learner is not None:
-        ensemble_probs = meta_learner.predict_proba(meta_input)[0]
-        ensemble_pred  = int(np.argmax(ensemble_probs))
-    else:
-        # Fallback: average
-        ensemble_probs = np.mean(prob_vectors, axis=0)
-        ensemble_pred  = int(np.argmax(ensemble_probs))
-
+    ensemble_pred = int(np.argmax(ensemble_probs))
     predicted_class = TARGET_CLASSES[ensemble_pred]
-
-    # --- Grad-CAM on the best individual model ---
-    gradcam_b64  = None
-    saliency_b64 = None
-    gradcam_model = None
-    gradcam_name  = None
-
-    # Pick whichever base model agrees with ensemble (highest conf for predicted class)
-    best_score = -1
-    for name in model_order:
-        if name in base_probs:
-            score = base_probs[name][ensemble_pred]
-            if score > best_score:
-                best_score    = score
-                gradcam_name  = name
-
-    if gradcam_name is not None:
-        try:
-            builder, path = spec_by_name[gradcam_name]
-            gradcam_model, err = load_model(builder, path, gradcam_name)
-            if gradcam_model is None:
-                raise RuntimeError(err or "Unable to load model for explainability")
-            t_grad = TRANSFORM(pil_image.convert("RGB")).unsqueeze(0).to(DEVICE)
-            gradcam_b64  = generate_gradcam_image(gradcam_model, gradcam_name, t_grad, ensemble_pred, orig_array)
-            t_grad2 = TRANSFORM(pil_image.convert("RGB")).unsqueeze(0).to(DEVICE)
-            saliency_b64 = generate_saliency_image(gradcam_model, t_grad2, ensemble_pred, orig_array)
-        except Exception as e:
-            print(f"XAI generation error: {e}")
-            traceback.print_exc()
-        finally:
-            if gradcam_model is not None:
-                del gradcam_model
-            gc.collect()
+    fast_prediction = {
+        "class": predicted_class,
+        "confidence": float(ensemble_probs[ensemble_pred]),
+        "probs": {TARGET_CLASSES[i]: float(ensemble_probs[i]) for i in range(NUM_CLASSES)},
+    }
 
     return {
         "predicted_class":  predicted_class,
         "ensemble_probs":   {TARGET_CLASSES[i]: float(ensemble_probs[i]) for i in range(NUM_CLASSES)},
         "ensemble_conf":    float(ensemble_probs[ensemble_pred]),
-        "base_predictions": {model_labels[n]: base_preds[n] for n in model_order},
-        "gradcam_image":    gradcam_b64,
-        "saliency_image":   saliency_b64,
-        "gradcam_model":    model_labels.get(gradcam_name, ""),
+        "base_predictions": {"MobileNetV2": fast_prediction},
+        "gradcam_image":    None,
+        "saliency_image":   None,
+        "gradcam_model":    "",
+        "inference_mode":   "fast_screening",
         "device":           str(DEVICE),
         "load_errors":      load_errors,
     }
@@ -421,7 +360,8 @@ async def index(request: Request):
 async def status():
     return {
         "models_loaded":   models_loaded,
-        "base_models":     [name for name, _, _ in MODEL_SPECS if name not in load_errors],
+        "base_models":     list(base_models.keys()),
+        "inference_mode":  "fast_screening",
         "ensemble_ready":  meta_learner is not None,
         "device":          str(DEVICE),
         "load_errors":     load_errors,

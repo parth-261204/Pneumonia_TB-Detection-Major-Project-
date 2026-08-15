@@ -265,7 +265,10 @@ function renderReport(data) {
     $('xaiSection').style.display = 'none';
   }
 
-  $('footerModel').textContent = ` Ensemble: ${MODEL_LABELS.join(', ')} → Logistic Regression meta-learner.`;
+  const isFastScreening = data.inference_mode === 'fast_screening';
+  $('footerModel').textContent = isFastScreening
+    ? ' Fast screening: cached MobileNetV2 model. For decision support only; clinician review is required.'
+    : ` Ensemble: ${MODEL_LABELS.join(', ')} → Logistic Regression meta-learner.`;
 
   // Show report
   reportIdle.style.display = 'none';
