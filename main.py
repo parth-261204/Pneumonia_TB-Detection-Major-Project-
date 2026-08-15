@@ -13,6 +13,15 @@ import gc
 import numpy as np
 from pathlib import Path
 from typing import Optional
+import warnings
+
+# Suppress sklearn unpickling warnings
+try:
+    from sklearn.exceptions import InconsistentVersionWarning
+    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+except ImportError:
+    pass
+
 
 import torch
 import torch.nn as nn
@@ -218,7 +227,7 @@ MODEL_SPECS = [
 def load_model(builder_fn, path, name):
     try:
         m = builder_fn()
-        state = torch.load(path, map_location=DEVICE)
+        state = torch.load(path, map_location=DEVICE, mmap=True, weights_only=True)
         # Handle common checkpoint wrappers
         if isinstance(state, dict) and "model_state_dict" in state:
             state = state["model_state_dict"]
